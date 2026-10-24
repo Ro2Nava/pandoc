@@ -52,10 +52,10 @@
     ( "fig:outer" , [] , [] )
     (Caption Nothing [ Plain [ Str "CAP" ] ])
     [ Figure
-        ( "fig:inner1" , [] , [] )
+        ( "fig:inner1" , [] , [ ( "width" , "50%" ) ] )
         (Caption Nothing [ Plain [ Str "CAP1" ] ])
         [ Figure
-            ( "" , [] , [] )
+            ( "" , [] , [ ( "width" , "50%" ) ] )
             (Caption Nothing [ Plain [ Str "CAP1.1" ] ])
             [ Plain
                 [ Image
@@ -63,7 +63,7 @@
                 ]
             ]
         , Figure
-            ( "" , [] , [] )
+            ( "" , [] , [ ( "width" , "50%" ) ] )
             (Caption Nothing [ Plain [ Str "CAP1.2" ] ])
             [ Plain
                 [ Image
@@ -72,12 +72,80 @@
             ]
         ]
     , Figure
-        ( "fig:inner2" , [] , [] )
+        ( "fig:inner2" , [] , [ ( "width" , "50%" ) ] )
         (Caption Nothing [ Plain [ Str "CAP2" ] ])
         [ Plain
             [ Image ( "" , [] , [] ) [] ( "test/media/rId25.jpg" , "" )
             ]
         ]
+    ]
+]
+```
+
+# Subfigures are lettered within their figure
+
+```
+% pandoc -f latex -t markdown
+\begin{figure}
+  \begin{subfigure}{0.5\textwidth}
+    \includegraphics{a.png}
+    \caption{Left}
+    \label{fig:left}
+  \end{subfigure}
+  \begin{subfigure}{0.5\textwidth}
+    \includegraphics{b.png}
+    \caption{Right}
+    \label{fig:right}
+  \end{subfigure}
+  \caption{Both}
+  \label{fig:both}
+\end{figure}
+\begin{figure}
+  \includegraphics{c.png}
+  \caption{Next}
+  \label{fig:next}
+\end{figure}
+See \ref{fig:both}, \ref{fig:right} and \ref{fig:next}.
+^D
+<figure id="fig:both">
+<figure id="fig:left" style="width:50%;">
+<img src="a.png" />
+<figcaption>Left</figcaption>
+</figure>
+<figure id="fig:right" style="width:50%;">
+<img src="b.png" />
+<figcaption>Right</figcaption>
+</figure>
+<figcaption>Both</figcaption>
+</figure>
+
+![Next](c.png){#fig:next}
+
+See [1](#fig:both){reference-type="ref" reference="fig:both"},
+[1b](#fig:right){reference-type="ref" reference="fig:right"} and
+[2](#fig:next){reference-type="ref" reference="fig:next"}.
+```
+
+# A subfigure's caption and label stay with the subfigure
+
+```
+% pandoc -f latex -t native
+\begin{figure}
+  \caption{Top}
+  \begin{subfigure}{\textwidth}
+    \includegraphics{d.png}
+    \caption{Only}
+    \label{fig:only}
+  \end{subfigure}
+\end{figure}
+^D
+[ Figure
+    ( "" , [] , [] )
+    (Caption Nothing [ Plain [ Str "Top" ] ])
+    [ Figure
+        ( "fig:only" , [] , [ ( "width" , "100%" ) ] )
+        (Caption Nothing [ Plain [ Str "Only" ] ])
+        [ Plain [ Image ( "" , [] , [] ) [] ( "d.png" , "" ) ] ]
     ]
 ]
 ```

@@ -170,7 +170,7 @@ Hello \colorbox{blue}{\textbf{World}}.
 [ Div
     ( "" , [] , [ ( "style" , "background-color: orange" ) ] )
     [ Div
-        ( "" , [ "minipage" ] , [] )
+        ( "" , [ "minipage" ] , [ ( "width" , "100%" ) ] )
         [ BulletList
             [ [ Para [ Str "Item" , Space , Str "1" ] ]
             , [ Para [ Str "Item" , Space , Str "2" ] ]
@@ -194,7 +194,7 @@ Hello \colorbox{blue}{\textbf{World}}.
 [ Div
     ( "" , [] , [ ( "style" , "background-color: blue" ) ] )
     [ Div
-        ( "" , [ "minipage" ] , [] )
+        ( "" , [ "minipage" ] , [ ( "width" , "100%" ) ] )
         [ BulletList
             [ [ Para [ Str "Item" , Space , Str "1" ] ]
             , [ Para [ Str "Item" , Space , Str "2" ] ]

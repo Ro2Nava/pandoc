@@ -11,6 +11,7 @@
 -}
 module Text.Pandoc.Readers.LaTeX.Inline
   ( acronymCommands
+  , newAcronym
   , verbCommands
   , charCommands
   , accentCommands
@@ -24,13 +25,14 @@ module Text.Pandoc.Readers.LaTeX.Inline
 where
 
 import qualified Data.Map as M
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Pandoc.Builder
 import Text.Pandoc.Shared (toRomanNumeral, safeRead)
 import Text.Pandoc.TeX (Tok (..), TokType (..))
 import Control.Applicative (optional, (<|>))
-import Control.Monad (guard, mzero, mplus, unless)
+import Control.Monad (guard, mzero, mplus, unless, when)
 import Text.Pandoc.Class.PandocMonad (PandocMonad (..))
 import Text.Pandoc.Translations (translateTerm)
 import Text.Pandoc.Readers.LaTeX.Parsing
@@ -384,10 +386,11 @@ refCommands = M.fromList
   , ("autoref", rawInlineOr "autoref" $ doref "ref+label") -- from hyperref.sty
   ]
 
-acronymCommands :: PandocMonad m => M.Map Text (LP m Inlines)
-acronymCommands = M.fromList
+acronymCommands :: PandocMonad m => LP m Inlines -> M.Map Text (LP m Inlines)
+acronymCommands tok = M.fromList
   -- glossaries package
-  [ ("gls", doAcronym "short")
+  [ ("newacronym", newAcronym tok)
+  , ("gls", doAcronym "short")
   , ("Gls", doAcronym "short")
   , ("glsdesc", doAcronym "long")
   , ("Glsdesc", doAcronym "long")
@@ -422,17 +425,42 @@ acronymCommands = M.fromList
   , ("Aclp", doAcronymPlural "long")
   ]
 
+-- | @\newacronym[options]{label}{short}{long}@ (glossaries package)
+newAcronym :: PandocMonad m => LP m Inlines -> LP m Inlines
+newAcronym tok = do
+  skipopts
+  key <- untokenize <$> braced
+  short <- tok
+  long <- tok
+  updateState $ \st ->
+    st{ sAcronyms = M.insert key (short, long) (sAcronyms st) }
+  return mempty
+
 doAcronym :: PandocMonad m => Text -> LP m Inlines
-doAcronym form = do
-  acro <- braced
-  return . mconcat $ [spanWith ("",[],[("acronym-label", untokenize acro),
-    ("acronym-form", "singular+" <> form)])
-    $ str $ untokenize acro]
+doAcronym = acronym "singular" id
 
 doAcronymPlural :: PandocMonad m => Text -> LP m Inlines
-doAcronymPlural form = do
-  acro <- braced
-  let plural = str "s"
-  return . mconcat $ [spanWith ("",[],[("acronym-label", untokenize acro),
-    ("acronym-form", "plural+" <> form)]) $
-   mconcat [str $ untokenize acro, plural]]
+doAcronymPlural = acronym "plural" (<> str "s")
+
+-- | An acronym in the given form.  If it was defined with
+-- @\newacronym@, the "short" form (@\gls@, @\ac@) is in full on
+-- first use, as in LaTeX; otherwise the key stands in for it.
+acronym :: PandocMonad m => Text -> (Inlines -> Inlines) -> Text -> LP m Inlines
+acronym number inflect form = do
+  key <- untokenize <$> braced
+  defs <- sAcronyms <$> getState
+  used <- sAcronymsUsed <$> getState
+  let contents = case M.lookup key defs of
+        Nothing -> inflect (str key)
+        Just (short, long) ->
+          let full = inflect long <> space <> str "(" <> inflect short <> str ")"
+          in case form of
+               "short" | key `Set.member` used -> inflect short
+                       | otherwise -> full
+               "long"  -> inflect long
+               "full"  -> full
+               _       -> inflect short
+  when (form == "short") $
+    updateState $ \st -> st{ sAcronymsUsed = Set.insert key (sAcronymsUsed st) }
+  return $ spanWith ("",[],[("acronym-label", key),
+                            ("acronym-form", number <> "+" <> form)]) contents

@@ -168,6 +168,8 @@ data LaTeXState = LaTeXState{ sOptions       :: ReaderOptions
                             , sInTableCell   :: Bool
                             , sLastHeaderNum :: DottedNum
                             , sLastFigureNum :: DottedNum
+                            , sLastSubfigureNum :: Int
+                              -- ^ subfigures so far in the current figure
                             , sLastTableNum  :: DottedNum
                             , sLastNoteNum   :: Int
                             , sFootnoteTexts :: M.Map Int Blocks
@@ -177,6 +179,12 @@ data LaTeXState = LaTeXState{ sOptions       :: ReaderOptions
                             , sLabels        :: M.Map Text [Inline]
                             , sHasChapters   :: Bool
                             , sToggles       :: M.Map Text Bool
+                            , sAcronyms      :: M.Map Text (Inlines, Inlines)
+                              -- ^ short and long forms of acronyms
+                              -- defined with @\newacronym@
+                            , sAcronymsUsed  :: Set.Set Text
+                              -- ^ acronyms already used with @\gls@
+                              -- (only the first use is in full)
                             , sFileContents  :: M.Map Text Text
                             , sEnableWithRaw :: Bool
                             , sRawTokens     :: [Tok]
@@ -214,6 +222,7 @@ defaultLaTeXState = LaTeXState{ sOptions       = def
                               , sInTableCell   = False
                               , sLastHeaderNum = DottedNum []
                               , sLastFigureNum = DottedNum []
+                              , sLastSubfigureNum = 0
                               , sLastTableNum  = DottedNum []
                               , sLastNoteNum   = 0
                               , sFootnoteTexts = M.empty
@@ -223,6 +232,8 @@ defaultLaTeXState = LaTeXState{ sOptions       = def
                               , sLabels        = M.empty
                               , sHasChapters   = False
                               , sToggles       = M.empty
+                              , sAcronyms      = M.empty
+                              , sAcronymsUsed  = Set.empty
                               , sFileContents  = M.empty
                               , sEnableWithRaw = True
                               , sRawTokens     = []

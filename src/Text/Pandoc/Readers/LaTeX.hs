@@ -65,7 +65,8 @@ import Text.Pandoc.Readers.LaTeX.Lang (inlineLanguageCommands,
                                        babelLangToBCP47,
                                        setDefaultLanguage)
 import Text.Pandoc.Readers.LaTeX.SIunitx (siunitxCommands)
-import Text.Pandoc.Readers.LaTeX.Inline (acronymCommands, refCommands,
+import Text.Pandoc.Readers.LaTeX.Inline (acronymCommands, newAcronym,
+                                         refCommands,
                                          nameCommands, charCommands,
                                          accentCommands,
                                          miscCommands,
@@ -242,15 +243,20 @@ doLHSverb =
   codeWith ("",["haskell"],[]) . untokenize
     <$> manyTill (satisfyTok (not . isNewlineTok)) (symbol '|')
 
+-- | A length relative to the text width or height as a percentage, e.g.
+-- @0.5\textwidth@ as @50%@ (a bare @\textwidth@ means @1\textwidth@);
+-- other lengths are unchanged.
+relativeLength :: Text -> Text
+relativeLength v =
+  case numUnit (if "\\" `T.isPrefixOf` v then "1" <> v else v) of
+       Just (num, "\\textwidth")  -> showFl (num * 100) <> "%"
+       Just (num, "\\linewidth")  -> showFl (num * 100) <> "%"
+       Just (num, "\\textheight") -> showFl (num * 100) <> "%"
+       _                          -> v
+
 mkImage :: PandocMonad m => [(Text, Text)] -> Text -> LP m Inlines
 mkImage options (T.unpack -> src) = do
-   let replaceRelative (k,v) =
-         case numUnit v of
-              Just (num, "\\textwidth") -> (k, showFl (num * 100) <> "%")
-              Just (num, "\\linewidth") -> (k, showFl (num * 100) <> "%")
-              Just (num, "\\textheight") -> (k, showFl (num * 100) <> "%")
-              _                         -> (k, v)
-   let kvs = map replaceRelative
+   let kvs = map (fmap relativeLength)
              $ filter (\(k,_) -> k `elem` ["width", "height"]) options
    let attr = ("",[], kvs)
    let alt = maybe (str "image") str $ lookup "alt" options
@@ -373,7 +379,7 @@ inlineCommands = M.unions
   , miscCommands
   , citationCommands inline
   , siunitxCommands tok
-  , acronymCommands
+  , acronymCommands tok
   , refCommands
   , nameCommands
   , verbCommands
@@ -453,7 +459,10 @@ inlineCommands = M.unions
                              mkImage options . unescapeURL $ src)
     -- svg
     , ("includesvg",      do options <- option [] keyvals
-                             src <- bracedFilename
+                             -- like the svg package, add .svg if
+                             -- there is no extension
+                             src <- T.pack . ensureExtension (not . null) ".svg"
+                                      . T.unpack <$> bracedFilename
                              mkImage options . unescapeURL $ src)
     -- hyperref
     , ("url", (\url -> linkWith ("",["uri"],[]) url "" (str url))
@@ -1214,6 +1223,8 @@ blockCommands = M.fromList
    , ("toggletrue", braced >>= setToggle True)
    , ("togglefalse", braced >>= setToggle False)
    , ("iftoggle", try $ ifToggle >> block)
+   -- glossaries
+   , ("newacronym", mempty <$ newAcronym tok)
    ]
 
 skipSameFileToks :: PandocMonad m => LP m ()
@@ -1228,11 +1239,19 @@ environments = M.union (tableEnvironments block inline) $
    , ("abstract", mempty <$ (env "abstract" blocks >>= addMeta "abstract"))
    , ("sloppypar", env "sloppypar" blocks)
    , ("letter", env "letter" letterContents)
-   , ("minipage", divWith ("",["minipage"],[]) <$>
-       env "minipage" (skipopts *> spaces *> optional braced *> spaces *> blocks))
-   , ("figure", env "figure" figure')
-   , ("figure*", env "figure*" figure')
-   , ("subfigure", env "subfigure" $ skipopts *> tok *> figure')
+   , ("minipage", env "minipage" $ do
+         skipopts *> spaces
+         width <- optional braced <* spaces
+         divWith ("",["minipage"], widthAttr width) <$> blocks)
+   , ("figure", env "figure" $ figure' False)
+   , ("figure*", env "figure*" $ figure' False)
+   , ("subfigure", env "subfigure" $ do
+         skipopts
+         width <- widthAttr <$> optional (try braced)
+         let addWidth (Figure (ident, classes, kvs) capt bs) =
+               Figure (ident, classes, width ++ kvs) capt bs
+             addWidth b = b
+         B.fromList . map addWidth . B.toList <$> figure' True)
    , ("center", divWith ("", ["center"], []) <$> env "center" blocks)
    , ("quote", blockQuote <$> env "quote" blocks)
    , ("quotation", blockQuote <$> env "quotation" blocks)
@@ -1397,12 +1416,23 @@ letterContents = do
                   _ -> mempty
   return $ addr <> bs -- sig added by \closing
 
-figure' :: PandocMonad m => LP m Blocks
-figure' = try $ do
+-- | The width of a subfigure or minipage as a "width" attribute.
+widthAttr :: Maybe [Tok] -> [(Text, Text)]
+widthAttr = maybe [] $ \toks ->
+  case T.strip (untokenize toks) of
+    "" -> []
+    w  -> [("width", relativeLength w)]
+
+-- | A figure, or a subfigure (subcaption package) if the argument is True.
+figure' :: PandocMonad m => Bool -> LP m Blocks
+figure' isSubfigure = try $ do
   sp
   poshint <- option "" $ untokenize <$> bracketedToks
   sp
+  outer <- getState
   resetCaption
+  unless isSubfigure $
+    updateState $ \st -> st{ sLastSubfigureNum = 0 }
   innerContent <- many $ try (Left <$> label) <|> (Right <$> block)
   let content = walk go $ mconcat $ snd $ partitionEithers innerContent
   st <- getState
@@ -1411,14 +1441,30 @@ figure' = try $ do
   let kvs = [("latex-placement", poshint) | not (T.null poshint)]
   let ident = fromMaybe "" mblabel
   let attr  = (ident, [], kvs)
-  case mblabel of
-    Nothing   -> pure ()
-    Just lab  -> do
-      num <- getNextNumber sLastFigureNum
-      setState
-        st { sLastFigureNum = num
-           , sLabels = M.insert lab [Str (renderDottedNum num)] (sLabels st)
-           }
+  if isSubfigure
+     then do
+       -- subfigures are lettered within the figure that contains
+       -- them, which has the next figure number: \ref gives "2a"
+       parentNum <- getNextNumber sLastFigureNum
+       let n = sLastSubfigureNum st + 1
+       let ref = renderDottedNum parentNum <> T.singleton (['a'..] !! (n - 1))
+       setState
+         st { sLastSubfigureNum = n
+            , sLabels = maybe id (\lab -> M.insert lab [Str ref]) mblabel
+                          (sLabels st)
+            -- the caption and label belong to the subfigure; restore
+            -- those of the enclosing figure
+            , sCaption = sCaption outer
+            , sLastLabel = sLastLabel outer
+            }
+     else case mblabel of
+       Nothing   -> pure ()
+       Just lab  -> do
+         num <- getNextNumber sLastFigureNum
+         setState
+           st { sLastFigureNum = num
+              , sLabels = M.insert lab [Str (renderDottedNum num)] (sLabels st)
+              }
   return $ B.figureWith attr caption' content
 
   where

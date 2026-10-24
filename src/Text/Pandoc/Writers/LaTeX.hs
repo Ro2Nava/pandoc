@@ -711,7 +711,12 @@ blockToLaTeX (Figure (ident, _, kvs) captnode body) = do
 toSubfigure :: PandocMonad m => Int -> Block -> LW m (Doc Text)
 toSubfigure nsubfigs blk = do
   contents <- blockToLaTeX blk
-  let linewidth = tshow @Double (0.9 / fromIntegral nsubfigs) <> "\\linewidth"
+  -- the width read from a subfigure or minipage, else an equal share
+  let frac = case blk of
+        Figure attr _ _ | Just (Percent p) <- dimension Width attr -> p / 100
+        Div attr _      | Just (Percent p) <- dimension Width attr -> p / 100
+        _ -> 0.9 / fromIntegral nsubfigs
+  let linewidth = tshow @Double frac <> "\\linewidth"
   return $ cr <> case blk of
     Figure {}    -> vcat
                     [ "\\begin{subfigure}[t]" <> braces (literal linewidth)

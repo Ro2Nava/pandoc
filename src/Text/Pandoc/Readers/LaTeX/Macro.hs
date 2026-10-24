@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Text.Pandoc.Readers.LaTeX.Macro
   ( macroDef
+  , columnTypeMacro
   )
 where
 import Text.Pandoc.Extensions (Extension(..))
@@ -34,6 +35,7 @@ macroDef constructor = do
   where commandDef = do
           nameMacroPairs <- newcommand <|> newDocumentCommand <|>
             newDocumentEnvironment <|> commandCopy <|> environmentCopy <|>
+            newcolumntype <|>
             checkGlobal (letmacro <|> edefmacro <|> defmacro <|> newif)
           guardDisabled Ext_latex_macros <|>
             mapM_ insertMacro nameMacroPairs
@@ -68,6 +70,7 @@ macroDefCommands = Set.fromList
   , "NewCommandCopy", "RenewCommandCopy", "DeclareCommandCopy"
   , "NewEnvironmentCopy", "RenewEnvironmentCopy", "DeclareEnvironmentCopy"
   , "newenvironment", "renewenvironment", "provideenvironment"
+  , "newcolumntype"
   ]
 
 insertMacro :: PandocMonad m => (Text, Macro) -> LP m ()
@@ -366,6 +369,28 @@ environmentCopy = try $ do
            then [] <$ report (MacroAlreadyDefined name pos)
            else return result) -- Renew or Declare
       <|> pure result
+
+-- | Parses @\newcolumntype{L}[n-args]{spec}@ (array package).  The
+-- column type is stored as a macro, which the column specification
+-- parser expands when it meets @L@; see 'columnTypeMacro'.
+newcolumntype :: PandocMonad m => LP m [(Text, Macro)]
+newcolumntype = do
+  controlSeq "newcolumntype"
+  withVerbatimMode $ do
+    spaces
+    name <- T.strip . untokenize <$> bracedOrToken
+    spaces
+    numargs <- option 0 $ try bracketedNum
+    spaces
+    contents <- bracedOrToken
+    return [(columnTypeMacro name,
+             Macro GroupScope ExpandWhenUsed (map ArgNum [1..numargs])
+               Nothing contents)]
+
+-- | Name of the macro holding a column type defined with
+-- @\newcolumntype@.
+columnTypeMacro :: Text -> Text
+columnTypeMacro c = "pandoccolumntype" <> letterize c
 
 -- | Encode a text using letters only (so that the result can be
 -- part of a control sequence name that survives retokenization).

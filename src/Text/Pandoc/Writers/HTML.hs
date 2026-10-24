@@ -938,9 +938,10 @@ blockToHtmlInner opts (Div attr@(ident, classes, kvs') bs) = do
                                            lookup "entry-spacing" kvs' >>=
                                            safeRead }
   let isCslBibEntry = "csl-entry" `elem` classes
+  let isSized = "column" `elem` classes || "minipage" `elem` classes
   let kvs = [(k,v) | (k,v) <- kvs'
-                   , k /= "width" || "column" `notElem` classes] ++
-            [("style", "width:" <> w <> ";") | "column" `elem` classes
+                   , k /= "width" || not isSized] ++
+            [("style", "width:" <> w <> ";") | isSized
                                              , ("width", w) <- kvs'] ++
             [("role", "list") | isCslBibBody && html5] ++
             [("role", "listitem") | isCslBibEntry && html5]
@@ -1140,10 +1141,13 @@ blockToHtmlInner opts (DefinitionList lst) = do
   defList opts contents
 blockToHtmlInner opts (Table attr caption colspecs thead tbody tfoot) =
   tableToHtml opts (Ann.toTable attr caption colspecs thead tbody tfoot)
-blockToHtmlInner opts (Figure attrs (Caption _ captBody)  body) = do
+blockToHtmlInner opts (Figure (ident, classes, kvs') (Caption _ captBody)  body) = do
   html5 <- gets stHtml5
 
-  figAttrs <- attrsToHtml opts attrs
+  -- a width (e.g. of a subfigure read from LaTeX) is a CSS width
+  let kvs = [(k,v) | (k,v) <- kvs', k /= "width"] ++
+            [("style", "width:" <> w <> ";") | ("width", w) <- kvs']
+  figAttrs <- attrsToHtml opts (ident, classes, kvs)
   contents <- blockListToHtml opts body
   captCont <- blockListToHtml opts captBody
   let figCaption = mconcat $

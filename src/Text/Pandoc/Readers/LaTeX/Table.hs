@@ -7,17 +7,19 @@ where
 import Data.Functor (($>))
 import Text.Pandoc.Class
 import Text.Pandoc.Readers.LaTeX.Parsing
+import Text.Pandoc.Readers.LaTeX.Macro (columnTypeMacro)
 import Text.Pandoc.TeX
 import Text.Pandoc.Builder as B
 import qualified Data.Map as M
 import Data.Text (Text)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import qualified Data.Text as T
 import Control.Applicative ((<|>), optional, many)
-import Control.Monad (when, void)
+import Control.Monad (guard, when, void)
+import Data.List.NonEmpty (NonEmpty(..))
 import Text.Pandoc.Shared (safeRead, trim, compactifyTable)
 import Text.Pandoc.Logging (LogMessage(SkippedContent))
-import Text.Pandoc.Walk (walkM)
+import Text.Pandoc.Walk (walkM, query)
 import Text.Pandoc.Parsing hiding (blankline, many, mathDisplay, mathInline,
                             optional, space, spaces, withRaw, (<|>))
 
@@ -31,7 +33,7 @@ tableEnvironments block inline =
           resetCaption *>
             simpTable block inline "longtable" False >>= addTableCaption)
   , ("table",  env "table" $
-          skipopts *> resetCaption *> blocks >>= addTableCaption)
+          skipopts *> resetCaption *> blocks >>= tableFloat >>= addTableCaption)
   , ("tabular*", env "tabular*" $ simpTable block inline "tabular*" True)
   , ("tabularx", env "tabularx" $ simpTable block inline "tabularx" True)
   , ("tabular", env "tabular"  $ simpTable block inline "tabular" False)
@@ -119,10 +121,19 @@ parseAligns = try $ do
                TokStream _ ts <- getInput
                setInput $ TokStream False (mconcat (replicate n spec) ++ ts)
              Nothing -> Prelude.fail $ "Could not parse " <> T.unpack ds <> " as number"
+  let userAlign = try $ do -- a column type from \newcolumntype
+        splitWordTok
+        Tok pos Symbol c <- anySymbol
+        let name = columnTypeMacro c
+        macros :| _ <- sMacros <$> getState
+        guard $ name `M.member` macros
+        TokStream _ ts <- getInput
+        -- expanded like a macro, arguments included
+        setInput $ TokStream False (Tok pos (CtrlSeq name) ("\\" <> name) : ts)
   bgroup
   spaces
   maybeBar
-  aligns' <- many $ try $ spaces >> optional starAlign >>
+  aligns' <- many $ try $ spaces >> optional starAlign >> optional userAlign >>
                             (alignSpec <* maybeBar)
   spaces
   egroup
@@ -354,6 +365,21 @@ simpTable block inline envname hasWidthParameter = try $ do
   let tf  = TableFoot nullAttr []
   return $ compactifyTable
          $ table emptyCaption (zip aligns widths) th tbs tf
+
+-- | A table float without a tabular (an image of a table, say) gets
+-- its contents put in a one-cell table, so that its caption and
+-- label are not lost.
+tableFloat :: PandocMonad m => Blocks -> LP m Blocks
+tableFloat bs = do
+  st <- getState
+  let hasTable = not $ null $ query isTable $ B.toList bs
+  return $
+    if hasTable || (isNothing (sCaption st) && isNothing (sLastLabel st))
+       then bs
+       else simpleTable [] [[bs]]
+  where
+    isTable Table{} = [()]
+    isTable _       = []
 
 addTableCaption :: PandocMonad m => Blocks -> LP m Blocks
 addTableCaption = walkM go

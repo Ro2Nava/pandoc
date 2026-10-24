@@ -87,6 +87,7 @@ data WriterEnv = WriterEnv
   , envListNumId      :: Int
   , envInDel          :: Bool
   , envInNote         :: Bool
+  , envInFigure       :: Bool  -- ^ True inside a figure (for subfigures)
   , envChangesAuthor  :: Text
   , envChangesDate    :: Text
   , envPrintWidth     :: Integer  -- in points
@@ -103,6 +104,7 @@ defaultWriterEnv = WriterEnv
   , envListNumId = 1
   , envInDel = False
   , envInNote = False
+  , envInFigure = False
   , envChangesAuthor  = "unknown"
   , envChangesDate    = "1969-12-31T19:00:00Z"
   , envPrintWidth     = 1

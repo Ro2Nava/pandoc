@@ -30,7 +30,7 @@ import Text.Pandoc.Char (isCJK)
 import Data.Ord (comparing)
 import Data.String (fromString)
 import qualified Data.Map as M
-import Data.Maybe (fromMaybe, maybeToList, isJust, listToMaybe)
+import Data.Maybe (fromMaybe, maybeToList, isJust, listToMaybe, catMaybes)
 import Control.Monad.State ( gets, modify, MonadTrans(lift) )
 import Control.Monad.Reader ( asks, MonadReader(local) )
 import qualified Data.Set as Set
@@ -612,8 +612,11 @@ blockToOpenXML' opts (DefinitionList items) = do
   return l
 blockToOpenXML' opts (Figure (ident, _, _) (Caption _ longcapt) body) = do
   setFirstPara
+  -- subfigures are part of their parent figure and don't get a number
+  isSubfigure <- asks envInFigure
   fignum <- gets stNextFigureNum
-  unless (null longcapt) $ modify $ \st -> st{ stNextFigureNum = fignum + 1 }
+  unless (null longcapt || isSubfigure) $
+    modify $ \st -> st{ stNextFigureNum = fignum + 1 }
   let refid = if T.null ident
               then "ref_fig" <> tshow fignum
               else "ref_" <> ident
@@ -631,15 +634,16 @@ blockToOpenXML' opts (Figure (ident, _, _) (Caption _ longcapt) body) = do
   let simpleImage x = do
         imgXML <- inlineToOpenXML opts x
         pure $ Elem (mknode "w:p" [] (map Elem paraProps ++ imgXML))
-  contentsNode <- case body of
-    [Plain [img@Image {}]] -> simpleImage img
-    [Para  [img@Image {}]] -> simpleImage img
-    _                      -> toFigureTable opts body
+  contentsNode <- local (\env -> env{ envInFigure = True }) $
+    case body of
+      [Plain [img@Image {}]] -> simpleImage img
+      [Para  [img@Image {}]] -> simpleImage img
+      _                      -> toFigureTable opts body
   -- Caption
   let imageCaption = withParaPropM (pStyleM "Image Caption")
                    . blocksToOpenXML opts
   let fstCaptionPara inlns = Para $
-        if not $ isEnabled Ext_native_numbering opts
+        if not (isEnabled Ext_native_numbering opts) || isSubfigure
         then inlns
         else let rawfld = RawInline (Format "openxml") $ mconcat
                           [ "<w:fldSimple w:instr=\"SEQ Figure"
@@ -663,36 +667,90 @@ toFigureTable :: PandocMonad m
               => WriterOptions -> [Block] -> WS m Content
 toFigureTable opts blks = do
   modify $ \s -> s { stInTable = True }
-  let ncols = length blks
-  let textwidth = 7920  -- 5.5 in in twips       (1 twip == 1/20 pt)
-  let cellfrac = 1 / fromIntegral ncols
-  let colwidth = tshow @Integer $ floor (textwidth * cellfrac) -- twips
-  let gridCols = replicate ncols $ mknode "w:gridCol" [("w:w", colwidth)] ()
-  let scaleImage = \case
+  pageWidth <- asks envPrintWidth
+  let textwidth = fromIntegral (pageWidth * 20)  -- twips (1 twip == 1/20 pt)
+  let cellMargin = 108  -- twips, left and right of each cell
+  let twips f = floor (textwidth * f) :: Integer
+  -- a cell takes the width of its subfigure or minipage, given as a
+  -- percentage of the text width; otherwise an equal share of its row
+  let givenFrac attr = case dimension Width attr of
+        Just (Percent p) | p > 0 -> Just (p / 100)
+        _                        -> Nothing
+  let cellFrac ncols = \case
+        Figure attr _ _ | Just f <- givenFrac attr -> f
+        Div attr _      | Just f <- givenFrac attr -> f
+        _                                          -> 1 / fromIntegral ncols
+  -- rows end at a line break (\\ between subfigures) or, as in LaTeX,
+  -- when the next cell would not fit in the text width
+  let isBreak = \case
+        Para [LineBreak]  -> True
+        Plain [LineBreak] -> True
+        _                 -> False
+  let explicitRows = filter (not . null) . map (filter (not . isBreak)) $
+        groupBy (\_ b -> not (isBreak b)) blks
+  let fill _ [] = [[]]
+      fill w (c@(f, _) : cs)
+        | w > 0 && w + f > 1.0001 = [] : fill 0 (c : cs)
+        | otherwise = case fill (w + f) cs of
+                        r : rs -> (c : r) : rs
+                        []     -> [[c]]
+  let rows = concat [ fill 0 [ (cellFrac (length r) b, b) | b <- r ]
+                    | r <- explicitRows ]
+  -- rows are centered; the grid has a column edge wherever a cell
+  -- starts or ends in any row
+  let rowFrac = sum . map fst
+  let tblFrac = maximum (0 : map rowFrac rows)
+  let edges r = map twips $ scanl (+) ((tblFrac - rowFrac r) / 2) (map fst r)
+  let points = Set.toAscList . Set.fromList $
+        0 : twips tblFrac : concatMap edges rows
+  let gridCols = [ mknode "w:gridCol" [("w:w", tshow (b - a))] ()
+                 | (a, b) <- zip points (drop 1 points) ]
+  let colspan a b = length [ p | p <- points, p > a, p <= b ]
+  -- percentages are relative to the text width, so they shrink with
+  -- the cell (inside its margins); absolute sizes stay as given.  An
+  -- image without a size fills its cell.
+  let scaleImage cellfrac = \case
         Image attr@(ident, classes, attribs) alt tgt ->
-          let dimWidth  = case dimension Width attr of
-                            Nothing -> Percent (cellfrac * 100)
-                            Just d  -> scaleDimension cellfrac d
-              dimHeight = scaleDimension cellfrac <$> dimension Height attr
-              attribs' = (tshow Width, tshow dimWidth) :
-                         (case dimHeight of
-                            Nothing -> id
-                            Just h  -> ((tshow Height, tshow h) :))
+          let scalePercent = \case
+                d@(Percent _) -> scaleDimension cellfrac d
+                d             -> d
+              dims = case (dimension Width attr, dimension Height attr) of
+                       (Nothing, Nothing) ->
+                         [(Width, Percent (cellfrac * 100))]
+                       (w, h) -> [ (dir, scalePercent d)
+                                 | (dir, Just d) <- [(Width, w), (Height, h)] ]
+              attribs' = [ (tshow dir, tshow d) | (dir, d) <- dims ] ++
                          [ (k, v) | (k, v) <- attribs
                                   , k `notElem` ["width", "height"]
                                   ]
           in Image (ident, classes, attribs') alt tgt
         x -> x
-  let blockToCell = Table.OOXMLCell nullAttr AlignCenter 1 1 . (:[])
-                  . walk scaleImage
-  tblBody <- Table.rowToOpenXML (blocksToOpenXML opts) .
-             Table.OOXMLRow Table.BodyRow nullAttr $
-             map blockToCell blks
+  let spacer n = [ Table.OOXMLCell nullAttr AlignDefault 1 (ColSpan n) []
+                 | n > 0 ]
+  let toRow r =
+        let es = edges r
+            cells = [ Table.OOXMLCell nullAttr AlignCenter 1
+                        (ColSpan (colspan a b)) [walk (scaleImage f) blk]
+                    | ((_, blk), a, b) <- zip3 r es (drop 1 es)
+                    , let f = fromIntegral (max 0 (b - a - 2 * cellMargin))
+                              / textwidth ]
+        in Table.OOXMLRow Table.BodyRow nullAttr $
+             spacer (colspan 0 (minimum es)) ++ cells ++
+             spacer (colspan (maximum es) (twips tblFrac))
+  tblBody <- mapM (Table.rowToOpenXML (blocksToOpenXML opts) . toRow) rows
   let tbl = mknode "w:tbl" []
         ( mknode "w:tblPr" []
           [ mknode "w:tblStyle" [("w:val","FigureTable")] (),
-            mknode "w:tblW" [ ("w:type", "auto"), ("w:w", "0") ] (),
+            mknode "w:tblW" [ ("w:type", "dxa")
+                            , ("w:w", tshow (twips tblFrac)) ] (),
             mknode "w:jc" [("w:val","center")] (),
+            -- keep the column widths: Word would otherwise shrink
+            -- each column to its image
+            mknode "w:tblLayout" [("w:type","fixed")] (),
+            mknode "w:tblCellMar" []
+              [ mknode ("w:" <> side) [ ("w:w", tshow cellMargin)
+                                      , ("w:type", "dxa") ] ()
+              | side <- ["left", "right"] ],
             mknode "w:tblLook" [ ("w:firstRow", "0")
                                , ("w:lastRow", "0")
                                , ("w:firstColumn", "0")
@@ -700,7 +758,7 @@ toFigureTable opts blks = do
                                ] ()
           ]
           : mknode "w:tblGrid" [] gridCols
-          : maybeToList tblBody
+          : catMaybes tblBody
         )
   modify $ \s -> s { stInTable = False }
   return $ Elem tbl
